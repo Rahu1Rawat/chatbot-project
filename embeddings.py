@@ -11,7 +11,18 @@ chroma_client = chromadb.Client()
 collection = chroma_client.create_collection(name="document_embeddings")
 
 
+def get_fresh_collection():
+    try:
+        chroma_client.delete_collection(name="document_embeddings")
+    except:
+        pass
+    return chroma_client.create_collection(name="document_embeddings")
+
+collection = get_fresh_collection()
+
 def generate_embeddings(text):
+    global collection
+    collection = get_fresh_collection()
     
     chunks = chunk_text(text, chunk_size=250, overlap=50)
     
@@ -33,30 +44,31 @@ def generate_embeddings(text):
     return chunks, embeddings
 
 def query_chroma(query_text):
-    query_embedding = co.embed(
+    SIMILARITY_THRESHOLD = 0.25
+    
+    query_embedding = np.array(co.embed(
         texts=[query_text],
         model="embed-english-v3.0",
         input_type="search_query"
-    ).embeddings[0]
+    ).embeddings[0])
 
     stored_embeddings = collection.get(include=["embeddings"])["embeddings"]
     
     if stored_embeddings.size == 0:
-        return "No relevant document found."
+        return []
     
-    similarity_scores = np.dot(query_embedding, stored_embeddings.T)
+    stored_embeddings_np = np.array(stored_embeddings)
     
-    sorted_idx = np.argsort(similarity_scores)[::-1]
+    similarity_scores = np.dot(query_embedding, stored_embeddings_np.T)
     
-    top_n = 3
-    top_documents = []
-    for idx in sorted_idx[:top_n]:
-        document = collection.get(ids=[f"chunk_{idx}"])["documents"][0]
-        top_documents.append(document)
-
-    if not top_documents:
-        return "No relevant document found."
+    qualified_indices = [
+        i for i, score in enumerate(similarity_scores)
+        if score > SIMILARITY_THRESHOLD
+    ]
     
-    return top_documents
-
-
+    sorted_indices = sorted(qualified_indices, 
+        key=lambda i: similarity_scores[i], 
+        reverse=True)[:3]
+    
+    return [collection.get(ids=[f"chunk_{idx}"])["documents"][0] 
+            for idx in sorted_indices]

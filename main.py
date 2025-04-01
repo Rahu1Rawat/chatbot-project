@@ -11,7 +11,7 @@ from config import COHERE_API_KEY
 
 app = FastAPI()
 
-app.add_middleware (
+app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
     allow_credentials=True,
@@ -22,6 +22,10 @@ app.add_middleware (
 co = cohere.ClientV2(COHERE_API_KEY)
 
 session_memory = []
+MAX_MEMORY = 20
+
+document_uploaded = False
+document_name = ""
 
 class Message(BaseModel):
     role: str
@@ -29,22 +33,31 @@ class Message(BaseModel):
 
 @app.post("/chat")
 async def chat(message: Message):
+    global document_uploaded, document_name
     session_memory.append({"role": message.role, "content": message.text})
+    
+    if len(session_memory) > MAX_MEMORY:
+        session_memory.pop(0)
 
-    # Step 1: Query ChromaDB to get relevant document chunks based on the user's message
+    system_prompt = "Use document-based knowledge if available. Otherwise, answer using general knowledge."
+    if document_uploaded:
+        system_prompt += f" A document named '{document_name}' has been uploaded and processed."
+    
+    system_message = {"role": "system", "content": system_prompt}
+    
     relevant_document_chunks = query_chroma(message.text)
-
-    # Step 2: If relevant document chunks are found, add them to session memory
-    if relevant_document_chunks != "No relevant document found.":
-        session_memory.append({"role": "system", "content": "Relevant document chunks:"})
+    
+    if relevant_document_chunks:
+        session_memory.append({"role": "system", "content": "Relevant document context:"})
         for chunk in relevant_document_chunks:
             session_memory.append({"role": "system", "content": chunk})
 
-    # Step 3: Generate response based on the updated session memory
     async def generate_response() -> AsyncGenerator[str, None]:
+        messages = [system_message] + session_memory
+
         response = co.chat_stream(
             model="command-a-03-2025",
-            messages=session_memory,
+            messages=messages,
         )
 
         full_response = ""
@@ -58,8 +71,10 @@ async def chat(message: Message):
 
     return StreamingResponse(generate_response(), media_type="text/event-stream")
 
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
+    global document_uploaded, document_name
     try:
         contents = await file.read()
         pdf_reader = PdfReader(io.BytesIO(contents))
@@ -67,6 +82,9 @@ async def upload_pdf(file: UploadFile = File(...)):
         extracted_text = "\n".join(page.extract_text() or "" for page in pdf_reader.pages)
         
         chunks, embeddings = generate_embeddings(extracted_text)
+        
+        document_uploaded = True
+        document_name = file.filename
         
         return {"text": extracted_text, "chunks": chunks, "embeddings": embeddings}
     
